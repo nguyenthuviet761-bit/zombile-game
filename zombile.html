@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ZOMBIE SQUAD: MULTIPLAYER P2P</title>
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <style>
+        body { margin: 0; background: #0a0a0a; color: #fff; font-family: 'Segoe UI', sans-serif; overflow: hidden; touch-action: none; }
+        canvas { display: none; background: #050505; }
+        
+        #menu { position: fixed; inset: 0; background: rgba(10,10,10,0.95); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+        .box { background: #1a1a1a; padding: 40px; border-radius: 20px; border: 2px solid #00d4ff; text-align: center; box-shadow: 0 0 20px rgba(0,212,255,0.2); width: 300px; }
+        
+        h1 { color: #00d4ff; margin-bottom: 25px; letter-spacing: 2px; }
+        input { display: block; width: 100%; padding: 12px; margin: 10px 0; border-radius: 8px; border: 1px solid #333; background: #000; color: #fff; box-sizing: border-box; outline: none; }
+        input:focus { border-color: #00d4ff; }
+        
+        .btn-group { display: flex; gap: 10px; margin-top: 15px; }
+        button { flex: 1; padding: 15px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        .btn-host { background: #00d4ff; color: #000; }
+        .btn-join { background: #2ecc71; color: #000; }
+        button:hover { opacity: 0.8; transform: translateY(-2px); }
+
+        #ui { position: absolute; top: 20px; left: 20px; pointer-events: none; z-index: 10; display: none; }
+        .stat { background: rgba(0,0,0,0.8); padding: 10px 20px; border-radius: 30px; margin-bottom: 8px; border-left: 5px solid #00d4ff; font-weight: bold; font-size: 14px; }
+        #msg { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); color: #00d4ff; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <div id="menu">
+        <div class="box">
+            <h1>ZOMBIE SQUAD</h1>
+            <input type="text" id="p-name" placeholder="Tên của bạn..." maxlength="10">
+            <input type="text" id="room-id" placeholder="Mã phòng (VD: 1234)...">
+            <div class="btn-group">
+                <button class="btn-host" onclick="initPeer(true)">TẠO PHÒNG</button>
+                <button class="btn-join" onclick="initPeer(false)">VÀO PHÒNG</button>
+            </div>
+            <p id="status" style="font-size: 12px; color: #888; margin-top: 15px;">Kết nối trực tiếp P2P - Không lo sập</p>
+        </div>
+    </div>
+
+    <div id="ui">
+        <div class="stat">HP: <span id="ui-hp">100</span>%</div>
+        <div class="stat">DIỆT: <span id="ui-score">0</span></div>
+        <div id="room-display" style="color:#888; font-size: 10px;">ROOM: -</div>
+    </div>
+
+    <div id="msg"></div>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        let peer, conn, isHost = false;
+        let others = {}; // Lưu trữ người chơi khác {id: data}
+        let player = { id: '', name: '', x: 0, y: 0, ang: 0, hp: 100, score: 0, bullets: [] };
+        let zombies = [], isStarted = false, keys = {}, lastFire = 0;
+
+        // --- HỆ THỐNG KẾT NỐI MULTIPLAYER ---
+        function initPeer(host) {
+            const name = document.getElementById('p-name').value || "Lính mới";
+            const room = document.getElementById('room-id').value;
+            if(!room) return alert("Hãy nhập Mã Phòng!");
+            
+            player.name = name;
+            isHost = host;
+            player.id = name + "_" + Math.floor(Math.random()*999);
+            
+            // Khởi tạo Peer với ID là mã phòng nếu là Host
+            peer = new Peer(isHost ? 'zsquad-' + room : undefined);
+
+            peer.on('open', (id) => {
+                console.log('ID của tôi:', id);
+                if(!isHost) {
+                    conn = peer.connect('zsquad-' + room);
+                    setupConn(conn);
+                }
+                startGame();
+            });
+
+            peer.on('connection', (c) => {
+                setupConn(c);
+                showMsg("Có đồng đội vừa vào!");
+            });
+
+            peer.on('error', (err) => {
+                alert("Lỗi: Mã phòng này có thể đã có người tạo hoặc sai!");
+                location.reload();
+            });
+        }
+
+        function setupConn(c) {
+            conn = c;
+            conn.on('data', (data) => {
+                if(data.type === 'update') others[data.id] = data.data;
+                if(data.type === 'zombie_sync') zombies = data.zombies;
+            });
+        }
+
+        function showMsg(txt) {
+            const m = document.getElementById('msg');
+            m.innerText = txt;
+            setTimeout(() => m.innerText = "", 3000);
+        }
+
+        // --- GAME LOGIC ---
+        function startGame() {
+            document.getElementById('menu').style.display = 'none';
+            document.getElementById('ui').style.display = 'block';
+            document.getElementById('room-display').innerText = "ROOM: " + document.getElementById('room-id').value;
+            canvas.style.display = 'block';
+            isStarted = true;
+            if(isHost) spawnZ();
+            requestAnimationFrame(gameLoop);
+        }
+
+        window.onkeydown = e => keys[e.code] = true;
+        window.onkeyup = e => keys[e.code] = false;
+        let mouse = {x:0, y:0, down: false};
+        window.onmousemove = e => { mouse.x = e.clientX; mouse.y = e.clientY; };
+        window.onmousedown = () => mouse.down = true;
+        window.onmouseup = () => mouse.down = false;
+
+        function spawnZ() {
+            if(!isStarted || zombies.length > 15) return;
+            const dist = 600 + Math.random()*300;
+            const a = Math.random()*Math.PI*2;
+            zombies.push({ x: player.x + Math.cos(a)*dist, y: player.y + Math.sin(a)*dist, hp: 2, id: Date.now() });
+            setTimeout(spawnZ, 2000);
+        }
+
+        function gameLoop(time) {
+            if(!isStarted) return;
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+
+            // Xoay & Di chuyển
+            player.ang = Math.atan2(mouse.y - canvas.height/2, mouse.x - canvas.width/2);
+            let s = 5;
+            if(keys['KeyW']) player.y -= s; if(keys['KeyS']) player.y += s;
+            if(keys['KeyA']) player.x -= s; if(keys['KeyD']) player.x += s;
+
+            // Bắn
+            if(mouse.down && time - lastFire > 150) {
+                player.bullets.push({x: player.x, y: player.y, vx: Math.cos(player.ang)*15, vy: Math.sin(player.ang)*15, life: 50});
+                lastFire = time;
+            }
+
+            // Đồng bộ dữ liệu
+            if(conn && conn.open) {
+                conn.send({ type: 'update', id: player.id, data: { x: player.x, y: player.y, ang: player.ang, name: player.name, bullets: player.bullets } });
+                if(isHost) conn.send({ type: 'zombie_sync', zombies: zombies });
+            }
+
+            // Cập nhật đạn & va chạm
+            player.bullets.forEach((b, bi) => {
+                b.x += b.vx; b.y += b.vy; b.life--;
+                if(b.life <= 0) player.bullets.splice(bi, 1);
+                
+                zombies.forEach((z, zi) => {
+                    if(Math.hypot(b.x - z.x, b.y - z.y) < 25) {
+                        z.hp--; player.bullets.splice(bi, 1);
+                        if(z.hp <= 0) {
+                            zombies.splice(zi, 1);
+                            player.score++;
+                            player.hp = Math.min(100, player.hp + 2);
+                        }
+                    }
+                });
+            });
+
+            // Zombie đuổi theo người gần nhất
+            zombies.forEach(z => {
+                let target = player;
+                let minDist = Math.hypot(player.x - z.x, player.y - z.y);
+                
+                // Zombie đuổi cả đồng đội
+                for(let id in others) {
+                    let d = Math.hypot(others[id].x - z.x, others[id].y - z.y);
+                    if(d < minDist) { target = others[id]; minDist = d; }
+                }
+
+                let angZ = Math.atan2(target.y - z.y, target.x - z.x);
+                z.x += Math.cos(angZ) * 1.5;
+                z.y += Math.sin(angZ) * 1.5;
+
+                if(Math.hypot(player.x - z.x, player.y - z.y) < 30) player.hp -= 0.05;
+            });
+
+            if(player.hp <= 0) location.reload();
+
+            // VẼ
+            ctx.clearRect(0,0,canvas.width,canvas.height);
+            ctx.save();
+            ctx.translate(canvas.width/2 - player.x, canvas.height/2 - player.y);
+
+            // Vẽ đồng đội
+            for(let id in others) {
+                let o = others[id];
+                ctx.save();
+                ctx.translate(o.x, o.y);
+                ctx.fillStyle = "#fff"; ctx.textAlign="center"; ctx.fillText(o.name, 0, -35);
+                ctx.rotate(o.ang);
+                ctx.fillRect(-15, -15, 30, 30);
+                ctx.restore();
+                // Đạn đồng đội
+                o.bullets.forEach(ob => {
+                    ctx.fillStyle = "#aaa"; ctx.beginPath(); ctx.arc(ob.x, ob.y, 3, 0, Math.PI*2); ctx.fill();
+                });
+            }
+
+            // Vẽ Zombie
+            zombies.forEach(z => {
+                ctx.fillStyle = "red"; ctx.beginPath(); ctx.arc(z.x, z.y, 18, 0, Math.PI*2); ctx.fill();
+            });
+
+            // Vẽ Đạn của mình
+            player.bullets.forEach(b => {
+                ctx.fillStyle = "yellow"; ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, Math.PI*2); ctx.fill();
+            });
+
+            // Vẽ Bạn
+            ctx.save();
+            ctx.translate(player.x, player.y);
+            ctx.fillStyle = "#00d4ff"; ctx.textAlign="center"; ctx.fillText(player.name + " (BẠN)", 0, -40);
+            ctx.rotate(player.ang);
+            ctx.fillRect(-15, -15, 30, 30);
+            ctx.fillStyle = "#555"; ctx.fillRect(15, -6, 20, 12);
+            ctx.restore();
+
+            ctx.restore();
+
+            document.getElementById('ui-hp').innerText = Math.floor(player.hp);
+            document.getElementById('ui-score').innerText = player.score;
+            requestAnimationFrame(gameLoop);
+        }
+    </script>
+</body>
+</html>
